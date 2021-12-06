@@ -5,7 +5,10 @@
 import argparse
 import os
 import time
+
+import numpy as np
 from loguru import logger
+import jpeg4py as jpeg
 
 import cv2
 
@@ -133,7 +136,8 @@ class Predictor(object):
         img_info = {"id": 0}
         if isinstance(img, str):
             img_info["file_name"] = os.path.basename(img)
-            img = cv2.imread(img)
+            # img = cv2.imread(img)
+            img = jpeg.JPEG(img).decode()[:, :, ::-1]
         else:
             img_info["file_name"] = None
 
@@ -183,6 +187,42 @@ class Predictor(object):
         vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names)
         return vis_res
 
+    def crop_max_dog_or_cat(self, output, img_info):
+        ratio = img_info["ratio"]
+        img = img_info["raw_img"]
+        if output is None:
+            return img
+        output = output.cpu()
+
+        bboxes = output[:, 0:4]
+
+        # preprocessing: resize
+        bboxes /= ratio
+        bboxes = bboxes.numpy()
+
+        cls = output[:, 6]
+        cls = cls.numpy().astype(int)
+        cls_names = [self.cls_names[clsid] for clsid in cls]
+        scores = (output[:, 4] * output[:, 5]).numpy()
+
+        dog_or_cat_idx = [i for i, x in enumerate(cls_names) if x in ["dog", "cat"]]
+        if len(dog_or_cat_idx) < 1:
+            return img
+
+        dog_or_cat_scores = scores[dog_or_cat_idx]
+        dog_or_cat_bboxes = bboxes[dog_or_cat_idx]
+
+        max_score_idx = np.argmax(dog_or_cat_scores)
+        max_score_bbox = dog_or_cat_bboxes[max_score_idx]
+        x0 = max(0, int(max_score_bbox[0]))
+        y0 = max(0, int(max_score_bbox[1]))
+        x1 = min(int(max_score_bbox[2]), img_info["width"])
+        y1 = min(int(max_score_bbox[3]), img_info["height"])
+
+        res_img = img[y0:y1, x0:x1]
+
+        return res_img
+
 
 def image_demo(predictor, vis_folder, path, current_time, save_result):
     if os.path.isdir(path):
@@ -204,6 +244,24 @@ def image_demo(predictor, vis_folder, path, current_time, save_result):
         ch = cv2.waitKey(0)
         if ch == 27 or ch == ord("q") or ch == ord("Q"):
             break
+
+def image_crop(predictor, vis_folder, path, current_time, save_result):
+    if os.path.isdir(path):
+        files = get_image_list(path)
+    else:
+        files = [path]
+    files.sort()
+    for image_name in files:
+        outputs, img_info = predictor.inference(image_name)
+        result_image = predictor.crop_max_dog_or_cat(outputs[0], img_info)
+        if save_result:
+            save_folder = os.path.join(
+                vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+            )
+            os.makedirs(save_folder, exist_ok=True)
+            save_file_name = os.path.join(save_folder, os.path.basename(image_name))
+            logger.info("Saving detection result in {}".format(save_file_name))
+            cv2.imwrite(save_file_name, result_image)
 
 
 def imageflow_demo(predictor, vis_folder, current_time, args):
@@ -305,6 +363,8 @@ def main(exp, args):
     current_time = time.localtime()
     if args.demo == "image":
         image_demo(predictor, vis_folder, args.path, current_time, args.save_result)
+    elif args.demo == "image_crop":
+        image_crop(predictor, vis_folder, args.path, current_time, args.save_result)
     elif args.demo == "video" or args.demo == "webcam":
         imageflow_demo(predictor, vis_folder, current_time, args)
 
